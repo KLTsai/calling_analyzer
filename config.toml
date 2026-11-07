@@ -1,0 +1,45 @@
+[timezone]
+# Timestamps in reports are shown in this timezone (all internal math uses UTC)
+display = "Asia/Taipei"
+
+[detection]
+# Minimum attempts in a 5-minute window before the error-rate rule can trigger.
+# Default 20 means a healthy key with 3 calls (error rate 33%) never fires.
+# See README for the quantified false-positive math behind this choice.
+min_samples = 20
+
+# Model pricing: USD per 1 million tokens, standard (non-cached, non-batch) tier.
+# input  = prompt token rate
+# output = completion token rate
+# Prices retrieved 2026-11-07. LLM prices change frequently — re-verify at source.
+# Full derivation notes in docs/research/llm-token-pricing.md.
+
+# --- Anthropic ---
+# Source: platform.claude.com/docs/en/about-claude/pricing
+[models.claude-sonnet-5-5]
+input  = 2.00
+output = 10.00
+
+[models.claude-haiku-5-5]
+input  = 0.10
+output = 0.50
+
+# --- OpenAI ---
+# Source: developers.openai.com/api/docs/pricing
+[models.gpt-5-4-mini]
+input  = 0.75
+output = 4.50
+
+# --- Google ---
+# Source: aistudio.google.com/docs/pricing
+[models.gemini-3-5-flash-lite]
+input  = 0.30
+output = 2.50
+
+# --- Self-hosted ---
+# Derived: Lambda H100 $4.59/GPU-hr, 1 000 output tok/s, 50 % utilisation,
+# prefill 10x faster than decode. Order-of-magnitude estimate; measure actual
+# throughput before trusting this number. See docs/research/llm-token-pricing.md.
+[models.selfhost-qwen-32b]
+input  = 0.25
+output = 2.00
