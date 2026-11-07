@@ -16,7 +16,7 @@ import json
 import math
 import tomllib
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -111,6 +111,7 @@ def analyze(
     time_reversal_count = 0
     duplicate_success_count = 0
     prev_ts: datetime | None = None
+    defect_reqs: set[str] = set()
 
     for raw in records:
         line = raw.strip()
@@ -124,6 +125,11 @@ def analyze(
 
         try:
             ts = datetime.fromisoformat(rec["timestamp"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            prompt_tokens = int(float(rec.get("prompt_tokens") or 0))
+            completion_tokens = int(float(rec.get("completion_tokens") or 0))
+            latency_ms = int(float(rec.get("latency_ms") or 0))
         except (ValueError, TypeError):
             unparseable_count += 1
             continue
@@ -134,9 +140,6 @@ def analyze(
 
         model = rec["model"]
         status = rec["status"]
-        prompt_tokens = int(rec.get("prompt_tokens") or 0)
-        completion_tokens = int(rec.get("completion_tokens") or 0)
-        latency_ms = int(rec.get("latency_ms") or 0)
         request_id = rec["request_id"]
         key_name = rec["key_name"]
         key_dept = rec["key_department"]
@@ -161,8 +164,9 @@ def analyze(
                 unattributable_cost += cost
             total_cost += cost
 
-        if not user_dept and user_id:
+        if not user_dept and user_id and request_id not in defect_reqs:
             attribution_defects += 1
+            defect_reqs.add(request_id)
 
         # T2: buffer attempt for waste
         req_buf[request_id].append((ts, status, cost))
@@ -246,6 +250,7 @@ def analyze(
             unattributable_cost / total_cost if total_cost else 0.0
         ),
         "attribution_defects": attribution_defects,
+        "min_samples": min_samples,
         "unknown_models": sorted(unknown_models),
         "retry_waste": retry_waste,
         "dead_loss": dead_loss,
@@ -285,7 +290,8 @@ def render_text(report: dict) -> str:
     out.append("")
     unattr = report["unattributable_cost"]
     frac = report["unattributable_fraction"]
-    out.append(f"  ⚠  無法歸屬費用：{_fmt_cost(unattr)}（佔總費用 {frac:.1%}）")
+    if unattr > 0:
+        out.append(f"  ⚠  無法歸屬費用：{_fmt_cost(unattr)}（佔總費用 {frac:.1%}）")
     if report["attribution_defects"]:
         n = report["attribution_defects"]
         out.append(f"     歸屬缺陷：{n} 筆（有使用者識別碼但查無部門資訊）")
@@ -298,8 +304,8 @@ def render_text(report: dict) -> str:
     out.append(f"  純失敗浪費  {_fmt_cost(report['dead_loss']):>12}  （從未成功的請求的全部費用）")
     if report["duplicate_success_count"]:
         n = report["duplicate_success_count"]
-        out.append(f"")
-        out.append(f"  ⚠  {n} 個請求出現多次成功——Gateway 可能重複送出，浪費數字可能偏低")
+        out.append("")
+        out.append(f"  ⚠  {n} 個請求出現多次成功 - Gateway 可能重複送出，浪費數字可能偏低")
     out.append("")
 
     # 異常偵測
@@ -317,7 +323,7 @@ def render_text(report: dict) -> str:
         out.append("  重試風暴：無")
     out.append("")
     if flags:
-        out.append(f"  錯誤率異常（5 分鐘窗 > 20%，樣本 ≥ {report.get('_min_samples', 20)}）：{len(flags)} 把鑰匙")
+        out.append(f"  錯誤率異常（5 分鐘窗 > 20%，樣本 ≥ {report.get('min_samples', 20)}）：{len(flags)} 把鑰匙")
         for f in flags:
             out.append(
                 f"    {f['key_name']:<32}  {f['error_rate']:.1%}  樣本 {f['sample_count']}"

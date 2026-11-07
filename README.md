@@ -73,7 +73,7 @@ LLM Gateway 用量分析報表
   重試浪費         $0.0126  （重試但最終成功的請求裡，失敗嘗試的費用）
   純失敗浪費       $0.2130  （從未成功的請求的全部費用）
 
-  ⚠  1 個請求出現多次成功——Gateway 可能重複送出，浪費數字可能偏低
+  ⚠  1 個請求出現多次成功 - Gateway 可能重複送出，浪費數字可能偏低
 
 ── 異常偵測 ──
 
@@ -131,7 +131,7 @@ LLM Gateway 用量分析報表
 
 **怎麼改**：先把輸入按 `request_id + timestamp` 排序，讓同一請求的嘗試連續出現，`req_buf` 退化為 O(單一請求的最大嘗試數) = O(3)，記憶體問題消失。部門費用、異常偵測、延遲百分位本身已是串流可加，不需要改動。真正到 10 億筆：換 Parquet 儲存，以 Spark 或 Flink 在 `request_id` 分區上做 session aggregation。
 
-**改了之後什麼變難**：(1) 重試分組在 Kafka 分區邊界斷開——同一 `request_id` 的 attempt 1 和 attempt 2 可能落在不同分區，需要全域排序或跨分區 join 步驟，otherwise-simple group-by 變成 distributed join。(2) 滑動窗在時間批次邊界也斷開——批次 T 的最後一筆記錄和批次 T+1 的第一筆記錄之間的窗口狀態不延續，需要 watermark 機制與 out-of-order buffer。
+**改了之後什麼變難**：(1) 重試分組在 Kafka 分區邊界斷開 - 同一 `request_id` 的 attempt 1 和 attempt 2 可能落在不同分區，需要全域排序或跨分區 join 步驟，otherwise-simple group-by 變成 distributed join。(2) 滑動窗在時間批次邊界也斷開 - 批次 T 的最後一筆記錄和批次 T+1 的第一筆記錄之間的窗口狀態不延續，需要 watermark 機制與 out-of-order buffer。
 
 ---
 
