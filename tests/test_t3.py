@@ -185,35 +185,33 @@ def test_error_rate_exactly_20_pct_does_not_trigger():
 
 
 def test_error_rate_calls_outside_5min_window_expire():
-    """Calls more than 5 minutes old must leave the window."""
+    """Errors outside the 5-minute window must not inflate the current error rate.
+
+    20 errors at t=0..190s (spaced 10s apart) — the window never reaches min_samples=30
+    during the error phase, so flag_set stays empty.  Then 10 successes at t=500..509s:
+    all errors have expired (last error at t=190, window start at t=200), so the window
+    contains 0 errors / 10 total = 0% error rate → still not triggered.
+
+    Without expiry, the window would contain 30 records with 20 errors = 66.7% → triggered.
+    """
     t0 = _BASE
-    # 10 errors at t=0, then 50 successes starting at t=6min (outside 5min window)
+    cfg = {"models": _PRICING, "detection": {"min_samples": 30}}
     lines = []
+    for i in range(20):
+        lines.append(rec(
+            ts=(t0 + timedelta(seconds=i * 10)).isoformat(),
+            key_name="key-expire",
+            status="error",
+        ))
     for i in range(10):
-        lines.append(rec(ts=(t0 + timedelta(seconds=i)).isoformat(),
-                         key_name="key-exp", status="error"))
-    for i in range(50):
-        lines.append(rec(ts=(t0 + timedelta(minutes=6, seconds=i)).isoformat(),
-                         key_name="key-exp", status="success"))
-    r = run(*lines, cfg=_CFG_ZERO)
-    # At the end of the stream the window contains only the 50 successes — 0% error rate
+        lines.append(rec(
+            ts=(t0 + timedelta(seconds=500 + i)).isoformat(),
+            key_name="key-expire",
+            status="success",
+        ))
+    r = run(*lines, cfg=cfg)
     flagged = {f["key_name"] for f in r["error_rate_flags"]}
-    # The flag may have been set earlier (when errors were in the window); we verify
-    # the final window state isn't the basis — but since the flag_set only updates on trigger,
-    # it may or may not contain key-exp depending on the final push. The important invariant
-    # is that expiry actually happens (covered by the cross-boundary test above).
-    # This test just confirms the final flagging state can clear.
-    # → actually with this data, errors at t=0..9 dominate when we push error records,
-    # but let's verify no trigger when only successes are recent:
-    # The flag_set updates to the latest seen trigger, so if at end of stream the
-    # window has 0% errors, the flag_set entry for key-exp should NOT exist.
-    # (Our implementation only adds to flag_set when condition is met at push time,
-    # so errors push will add it, successes push won't update it. The flag_set
-    # retains the last-triggered state. So "key-exp" may remain from the error pushes.)
-    # This is acceptable behavior: a flag means "was flagged at some point in the stream."
-    # The important invariant tested elsewhere is that the sliding window correctly ignores
-    # old events.
-    pass  # structural: expiry tested via cross-boundary incident test
+    assert "key-expire" not in flagged
 
 
 # ---------------------------------------------------------------------------

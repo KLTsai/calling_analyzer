@@ -39,7 +39,8 @@ def run(*lines, cfg=None):
 
 
 def _cost(prompt, compl):
-    return (prompt * 2.0 + compl * 10.0) / 1_000_000
+    # input=$2/1M, output=$10/1M — literals from config.toml, independent of production code
+    return prompt * 2e-6 + compl * 10e-6
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +134,7 @@ def test_duplicate_success_triggers_warning():
         rec(ts=ts(0),  request_id="req-dup2", attempt=1, status="success"),
         rec(ts=ts(30), request_id="req-dup2", attempt=2, status="success"),
     )
-    assert r["duplicate_success_count"] >= 1
+    assert r["duplicate_success_count"] == 1
 
 
 def test_no_duplicate_success_when_only_one_success():
