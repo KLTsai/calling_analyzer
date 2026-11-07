@@ -94,6 +94,7 @@ LLM Gateway 用量分析報表
   gpt-5-4-mini                       1166ms     4060ms     285
   selfhost-qwen-32b                  1097ms     5781ms     167
   gemini-3-5-flash-lite              1038ms     4510ms     155
+  unpriced-model-zzz                  900ms      900ms       1
 
 ── 資料品質 ──
 
