@@ -93,6 +93,9 @@ def analyze(
     unattributable_cost = 0.0
     attribution_defects = 0
     unknown_models: set[str] = set()
+    unpriced_usage: defaultdict[str, dict] = defaultdict(
+        lambda: {"prompt_tokens": 0, "completion_tokens": 0, "attempts": 0}
+    )
     # T2: per-request buffer for waste computation
     req_buf: defaultdict[str, list] = defaultdict(list)
     # T3: anomaly detection windows
@@ -155,6 +158,10 @@ def analyze(
         else:
             cost = None
             unknown_models.add(model)
+            u = unpriced_usage[model]
+            u["prompt_tokens"] += prompt_tokens
+            u["completion_tokens"] += completion_tokens
+            u["attempts"] += 1
 
         if cost is not None:
             if user_dept:
@@ -252,6 +259,10 @@ def analyze(
         "attribution_defects": attribution_defects,
         "min_samples": min_samples,
         "unknown_models": sorted(unknown_models),
+        "unpriced_usage": sorted(
+            [{"model": m, **v} for m, v in unpriced_usage.items()],
+            key=lambda x: -(x["prompt_tokens"] + x["completion_tokens"]),
+        ),
         "retry_waste": retry_waste,
         "dead_loss": dead_loss,
         "duplicate_success_count": duplicate_success_count,
@@ -356,21 +367,32 @@ def render_text(report: dict) -> str:
         out.append("")
 
     # 資料品質警告
-    warnings: list[str] = []
-    if report["unknown_models"]:
-        models_str = "、".join(report["unknown_models"])
-        warnings.append(f"未定價模型（費用未計入總額）：{models_str}")
-    if report["unparseable_count"]:
-        warnings.append(f"{report['unparseable_count']} 行無法解析，已略過")
-    if report["time_reversal_count"]:
-        warnings.append(
-            f"偵測到 {report['time_reversal_count']} 次時間倒置，滑動窗結果可能失準"
-        )
-    if warnings:
+    unpriced = report.get("unpriced_usage") or []
+    has_warnings = bool(
+        unpriced or report["unparseable_count"] or report["time_reversal_count"]
+    )
+    if has_warnings:
         out.append("── 資料品質 ──")
         out.append("")
-        for w in warnings:
-            out.append(f"  ⚠  {w}")
+        if unpriced:
+            out.append("  ⚠  未定價模型（token 數已統計，費用未計入總額）：")
+            out.append(
+                f"       {'模型':<28}  {'prompt tok':>10}  {'compl tok':>10}  {'筆數':>6}  {'費用':>8}"
+            )
+            for u in unpriced:
+                out.append(
+                    f"       {u['model']:<28}  "
+                    f"{u['prompt_tokens']:>10,}  "
+                    f"{u['completion_tokens']:>10,}  "
+                    f"{u['attempts']:>6,}  "
+                    f"{'未定價':>8}"
+                )
+        if report["unparseable_count"]:
+            out.append(f"  ⚠  {report['unparseable_count']} 行無法解析，已略過")
+        if report["time_reversal_count"]:
+            out.append(
+                f"  ⚠  偵測到 {report['time_reversal_count']} 次時間倒置，滑動窗結果可能失準"
+            )
         out.append("")
 
     return "\n".join(out)

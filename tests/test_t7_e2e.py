@@ -38,6 +38,11 @@ def test_sample_data_headline_numbers():
     assert r["unparseable_count"] == 2
     # The unpriced model is flagged
     assert "unpriced-model-zzz" in r["unknown_models"]
+    # And its token usage is reported, not silently dropped
+    usage = {u["model"]: u for u in r["unpriced_usage"]}
+    assert usage["unpriced-model-zzz"]["attempts"] == 1
+    assert usage["unpriced-model-zzz"]["prompt_tokens"] == 1000
+    assert usage["unpriced-model-zzz"]["completion_tokens"] == 200
 
 
 def test_sample_data_anomalies():

@@ -128,6 +128,46 @@ def test_unknown_model_warning_in_text_output():
     assert "未定價" in text
 
 
+# ---------------------------------------------------------------------------
+# unpriced model: token counts tallied, cost cell shows 未定價
+# ---------------------------------------------------------------------------
+
+def test_unpriced_usage_tokens_tallied():
+    r = run(
+        rec(model="ghost-model", prompt_tokens=1234, completion_tokens=567),
+        rec(model="ghost-model", prompt_tokens=100,  completion_tokens=50, request_id="r2"),
+    )
+    rows = {u["model"]: u for u in r["unpriced_usage"]}
+    assert rows["ghost-model"]["prompt_tokens"] == 1334
+    assert rows["ghost-model"]["completion_tokens"] == 617
+    assert rows["ghost-model"]["attempts"] == 2
+
+
+def test_unpriced_cost_cell_shows_literal_string():
+    from analyzer import render_text
+    r = run(rec(model="ghost-model", prompt_tokens=1000, completion_tokens=200))
+    text = render_text(r)
+    # The cost cell for the unpriced row must be the literal string "未定價",
+    # never a number or "$0".
+    assert "未定價" in text
+    # And the row must carry the tokens so a reader sees the exposure.
+    assert "1,000" in text
+    assert "200" in text
+
+
+def test_unpriced_usage_sorted_by_total_tokens_descending():
+    r = run(
+        rec(model="small-unpriced", prompt_tokens=10,   completion_tokens=5,  request_id="r1"),
+        rec(model="big-unpriced",   prompt_tokens=5000, completion_tokens=1000, request_id="r2"),
+    )
+    assert r["unpriced_usage"][0]["model"] == "big-unpriced"
+
+
+def test_priced_model_not_in_unpriced_usage():
+    r = run(rec(model="sonnet"))
+    assert r["unpriced_usage"] == []
+
+
 def test_unparseable_warning_in_text_output():
     from analyzer import render_text
     r = run("bad json", rec())
