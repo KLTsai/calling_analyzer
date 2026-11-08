@@ -132,11 +132,23 @@ LLM Gateway 用量分析報表
 
 ## 每天 1,000 萬筆時
 
-**先死在哪**：浪費計算的 `req_buf`（請求識別碼分組）是記憶體牆。15 萬筆實測約 1.2 秒、記憶體 ≈ 30 MB；按比例外推到 1,000 萬筆，時間約 80 秒仍可接受，但 `req_buf` 會長到 ≈ 2 GB，超過 Python 行程的合理上限。錯誤率的滑動窗 deque 若有大量唯一鑰匙名稱也會同步增長。
+**先死在哪**（記憶體牆）
 
-**怎麼改**：先把輸入按 `request_id + timestamp` 排序，讓同一請求的嘗試連續出現，`req_buf` 退化為 O(單一請求的最大嘗試數) = O(3)，記憶體問題消失。部門費用、異常偵測、延遲百分位本身已是串流可加，不需要改動。真正到 10 億筆：換 Parquet 儲存，以 Spark 或 Flink 在 `request_id` 分區上做 session aggregation。
+- 浪費計算的 `req_buf` 按 request_id 分組，隨量線性成長
+- 15 萬筆實測：1.2 秒 / 30 MB
+- 1,000 萬筆外推：80 秒可接受，但 `req_buf` ≈ 2 GB 超過 Python 行程上限
+- 錯誤率滑動窗 deque 若有大量唯一鑰匙名稱也會同步增長
 
-**改了之後什麼變難**：(1) 重試分組在 Kafka 分區邊界斷開 - 同一 `request_id` 的 attempt 1 和 attempt 2 可能落在不同分區，需要全域排序或跨分區 join 步驟，otherwise-simple group-by 變成 distributed join。(2) 滑動窗在時間批次邊界也斷開 - 批次 T 的最後一筆記錄和批次 T+1 的第一筆記錄之間的窗口狀態不延續，需要 watermark 機制與 out-of-order buffer。
+**怎麼改**
+
+- 先把輸入按 `request_id + timestamp` 排序 → 同請求嘗試連續出現 → `req_buf` 退化為 O(3)，記憶體問題消失
+- 部門費用、異常偵測、延遲百分位本身是串流可加，不需改
+- 真正到 10 億筆：換 Parquet，以 Spark 或 Flink 在 `request_id` 分區做 session aggregation
+
+**改了之後什麼變難**
+
+1. **重試分組斷在 Kafka 分區邊界**：同一 `request_id` 的 attempt 1、2 可能落在不同分區，group-by 變 distributed join
+2. **滑動窗斷在批次邊界**：批次 T 末筆與 T+1 首筆之間窗口狀態不延續，需要 watermark + out-of-order buffer
 
 ---
 
