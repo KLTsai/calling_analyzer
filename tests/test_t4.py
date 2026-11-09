@@ -13,11 +13,11 @@ _CONFIG = {"models": {"sonnet": {"input": 2.0, "output": 10.0}}}
 def rec(ts=None, model="sonnet", status="success", latency=1000, **kw):
     t = (ts or _BASE).isoformat()
     base = {
-        "timestamp": t,
+        "ts": t,
         "request_id": "req-001",
         "attempt": 1,
-        "key_name": "key-eng",
-        "key_department": "Engineering",
+        "key_alias": "key-eng",
+        "key_owner_dept": "Engineering",
         "model": model,
         "status": status,
         "prompt_tokens": 1000,

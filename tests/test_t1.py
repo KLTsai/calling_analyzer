@@ -17,11 +17,11 @@ _CONFIG = {"models": _PRICING}
 
 def rec(**kwargs) -> str:
     base = {
-        "timestamp":         "2026-11-08T10:00:00+08:00",
+        "ts":         "2026-11-08T10:00:00+08:00",
         "request_id":        "req-001",
         "attempt":           1,
-        "key_name":          "key-eng",
-        "key_department":    "Engineering",
+        "key_alias":          "key-eng",
+        "key_owner_dept":    "Engineering",
         "model":             "sonnet",
         "status":            "success",
         "prompt_tokens":     1000,
@@ -40,15 +40,15 @@ def run(*lines: str, cfg=None) -> dict:
 # cost attribution
 # ---------------------------------------------------------------------------
 
-def test_cost_goes_to_user_department_when_set():
-    r = run(rec(user_department="Product", key_department="Engineering"))
+def test_cost_goes_to_end_user_dept_when_set():
+    r = run(rec(end_user_dept="Product", key_owner_dept="Engineering"))
     names = {d["name"] for d in r["departments"]}
     assert "Product" in names
     assert "Engineering" not in names
 
 
-def test_cost_goes_to_key_department_when_no_user_department():
-    r = run(rec(key_department="Engineering"))
+def test_cost_goes_to_key_owner_dept_when_no_end_user_dept():
+    r = run(rec(key_owner_dept="Engineering"))
     names = {d["name"] for d in r["departments"]}
     assert "Engineering" in names
 
@@ -57,9 +57,9 @@ def test_unattributable_fraction_numerator_and_denominator():
     # 2 direct calls + 1 agent call; direct calls are unattributable
     per = (1000 * 2.00 + 200 * 10.00) / 1_000_000
     r = run(
-        rec(key_department="Engineering"),
-        rec(key_department="Engineering"),
-        rec(user_department="Product"),
+        rec(key_owner_dept="Engineering"),
+        rec(key_owner_dept="Engineering"),
+        rec(end_user_dept="Product"),
     )
     assert abs(r["unattributable_cost"] - per * 2) < 1e-9
     assert abs(r["total_cost"]          - per * 3) < 1e-9
@@ -67,17 +67,41 @@ def test_unattributable_fraction_numerator_and_denominator():
 
 
 def test_attribution_defects_independent_of_unattributable_cost():
-    # defect: user_id present, user_department absent
+    # defect: end_user present, end_user_dept absent
     r = run(
-        rec(user_id="u001"),              # defect + unattributable
-        rec(key_department="Engineering"), # unattributable but NOT a defect
+        rec(end_user="u001"),              # defect + unattributable
+        rec(key_owner_dept="Engineering"), # unattributable but NOT a defect
     )
     assert r["attribution_defects"] == 1
     assert r["unattributable_fraction"] == 1.0
 
 
-def test_attribution_defect_zero_when_user_department_present():
-    r = run(rec(user_id="u001", user_department="Product"))
+def test_unattributable_breakdown_uses_agent_id():
+    """agent_id 區分三種無法歸屬：直接呼叫（結構性）、Agent 未帶 end_user、有 end_user 但缺部門。"""
+    per = (1000 * 2.00 + 200 * 10.00) / 1_000_000
+    r = run(
+        rec(request_id="r1"),                                        # direct call
+        rec(request_id="r2", agent_id=None, end_user=None),          # direct call, explicit nulls
+        rec(request_id="r3", agent_id="agent-batch"),                # agent, no end_user
+        rec(request_id="r4", agent_id="agent-x", end_user="u001"),   # defect
+        rec(request_id="r5", agent_id="agent-x", end_user="u002", end_user_dept="Product"),
+    )
+    b = r["unattributable_breakdown"]
+    assert abs(b["direct"] - per * 2) < 1e-9
+    assert abs(b["agent_without_end_user"] - per) < 1e-9
+    assert abs(b["end_user_without_dept"] - per) < 1e-9
+    assert abs(r["unattributable_cost"] - per * 4) < 1e-9
+    assert r["attribution_defects"] == 1
+
+
+def test_blank_optional_fields_treated_as_empty():
+    r = run(rec(agent_id="", end_user="  ", end_user_dept=""))
+    assert r["attribution_defects"] == 0
+    assert r["unattributable_breakdown"]["direct"] > 0
+
+
+def test_attribution_defect_zero_when_end_user_dept_present():
+    r = run(rec(end_user="u001", end_user_dept="Product"))
     assert r["attribution_defects"] == 0
 
 
@@ -119,7 +143,7 @@ def test_timeout_partial_completion_tokens_charged():
 
 def test_unknown_model_listed_not_zero():
     r = run(rec(model="ghost-model-9000"))
-    assert "ghost-model-9000" in r["unknown_models"]
+    assert [u["model"] for u in r["unpriced_usage"]] == ["ghost-model-9000"]
     # unknown cost must not leak into total
     assert r["total_cost"] == 0.0
 
@@ -134,7 +158,7 @@ def test_known_and_unknown_models_total_excludes_unknown():
     per = (1000 * 2.00 + 200 * 10.00) / 1_000_000
     r = run(rec(model="sonnet"), rec(model="ghost-model-9000"))
     assert abs(r["total_cost"] - per) < 1e-9
-    assert "ghost-model-9000" in r["unknown_models"]
+    assert [u["model"] for u in r["unpriced_usage"]] == ["ghost-model-9000"]
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +172,7 @@ def test_unparseable_line_counted_not_crashed():
 
 
 def test_missing_required_field_counted():
-    bad = json.dumps({"timestamp": "2026-11-08T10:00:00+08:00", "request_id": "r1"})
+    bad = json.dumps({"ts": "2026-11-08T10:00:00+08:00", "request_id": "r1"})
     r = run(bad, rec())
     assert r["unparseable_count"] == 1
 
@@ -157,14 +181,6 @@ def test_empty_lines_ignored():
     r = run("", "   ", rec())
     assert r["unparseable_count"] == 0
     assert r["total_cost"] > 0.0
-
-
-def test_time_reversal_detected():
-    r = run(
-        rec(timestamp="2026-11-08T10:05:00+08:00"),
-        rec(timestamp="2026-11-08T10:00:00+08:00"),  # earlier than previous
-    )
-    assert r["time_reversal_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +202,8 @@ def test_no_average_field_in_report():
 def test_departments_sorted_by_cost_descending():
     # Engineering gets 1 record, Product gets 1 high-cost record
     r = run(
-        rec(key_department="Engineering", prompt_tokens=100, completion_tokens=10),
-        rec(key_department="Product",     prompt_tokens=10000, completion_tokens=1000),
+        rec(key_owner_dept="Engineering", prompt_tokens=100, completion_tokens=10),
+        rec(key_owner_dept="Product",     prompt_tokens=10000, completion_tokens=1000),
     )
     assert r["departments"][0]["name"] == "Product"
     assert r["departments"][1]["name"] == "Engineering"

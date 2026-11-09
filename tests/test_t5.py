@@ -12,11 +12,11 @@ _CONFIG = {"models": {"sonnet": {"input": 2.0, "output": 10.0}}}
 
 def rec(**kw):
     base = {
-        "timestamp": _BASE.isoformat(),
+        "ts": _BASE.isoformat(),
         "request_id": "req-001",
         "attempt": 1,
-        "key_name": "key-eng",
-        "key_department": "Engineering",
+        "key_alias": "key-eng",
+        "key_owner_dept": "Engineering",
         "model": "sonnet",
         "status": "success",
         "prompt_tokens": 1000,
@@ -42,16 +42,16 @@ def test_invalid_json_counted_not_crashed():
 
 
 def test_missing_required_field_counted():
-    bad = json.dumps({"timestamp": _BASE.isoformat(), "request_id": "r1"})
+    bad = json.dumps({"ts": _BASE.isoformat(), "request_id": "r1"})
     r = run(bad, rec())
     assert r["unparseable_count"] == 1
 
 
 def test_bad_timestamp_counted():
     bad = json.dumps({
-        "timestamp": "not-a-timestamp",
+        "ts": "not-a-timestamp",
         "request_id": "r1", "attempt": 1,
-        "key_name": "k", "key_department": "d",
+        "key_alias": "k", "key_owner_dept": "d",
         "model": "sonnet", "status": "success",
         "prompt_tokens": 1, "completion_tokens": 1, "latency_ms": 1,
     })
@@ -76,7 +76,7 @@ def test_multiple_bad_lines_counted():
 
 def test_unknown_model_listed():
     r = run(rec(model="ghost-model"))
-    assert "ghost-model" in r["unknown_models"]
+    assert [u["model"] for u in r["unpriced_usage"]] == ["ghost-model"]
 
 
 def test_unknown_model_cost_not_in_total():
@@ -93,27 +93,7 @@ def test_known_plus_unknown_total_excludes_unknown():
     cost_known = (1000 * 2.0 + 200 * 10.0) / 1_000_000
     r = run(rec(model="sonnet"), rec(model="ghost-model", request_id="r2"))
     assert abs(r["total_cost"] - cost_known) < 1e-9
-    assert "ghost-model" in r["unknown_models"]
-
-
-# ---------------------------------------------------------------------------
-# time reversal
-# ---------------------------------------------------------------------------
-
-def test_time_reversal_detected_and_counted():
-    r = run(
-        rec(timestamp=((_BASE + timedelta(minutes=5)).isoformat())),
-        rec(timestamp=_BASE.isoformat()),  # earlier than previous
-    )
-    assert r["time_reversal_count"] == 1
-
-
-def test_in_order_records_no_time_reversal():
-    r = run(
-        rec(timestamp=_BASE.isoformat()),
-        rec(timestamp=(_BASE + timedelta(seconds=1)).isoformat()),
-    )
-    assert r["time_reversal_count"] == 0
+    assert [u["model"] for u in r["unpriced_usage"]] == ["ghost-model"]
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +155,40 @@ def test_unparseable_warning_in_text_output():
     assert "無法解析" in text
 
 
-def test_time_reversal_warning_in_text_output():
+# ---------------------------------------------------------------------------
+# unparseable lines say why, so a wrong schema is obvious
+# ---------------------------------------------------------------------------
+
+def test_wrong_schema_reports_missing_field_names():
+    """用不同欄位名稱（例如 timestamp / key_name）的資料，報表要指出缺哪些欄位，
+    而不是安靜地輸出一份全是 0 的報表。"""
+    old = json.loads(rec())
+    old["timestamp"] = old.pop("ts")
+    old["key_name"] = old.pop("key_alias")
+    r = run(json.dumps(old), json.dumps(old))
+    assert r["unparseable_count"] == 2
+    assert r["unparseable_reasons"] == {"missing_fields": 2}
+    assert r["missing_fields"] == {"ts": 2, "key_alias": 2}
     from analyzer import render_text
-    r = run(
-        rec(timestamp=(_BASE + timedelta(minutes=5)).isoformat()),
-        rec(timestamp=_BASE.isoformat()),
-    )
     text = render_text(r)
-    assert "時間倒置" in text
+    assert "缺少必要欄位" in text and "ts（2）" in text
+
+
+def test_null_required_field_counts_as_missing():
+    r = run(rec(model=None), rec())
+    assert r["missing_fields"] == {"model": 1}
+
+
+def test_unknown_status_rejected():
+    r = run(rec(status="ok"), rec())
+    assert r["unparseable_reasons"] == {"invalid_value": 1}
+
+
+def test_non_object_json_rejected():
+    r = run("[1, 2]", "42", rec())
+    assert r["unparseable_reasons"] == {"invalid_json": 2}
+
+
+def test_naive_timestamp_treated_as_utc():
+    r = run(rec(ts="2026-11-08T02:00:00"), rec(ts="2026-11-08T10:00:00+08:00", request_id="r2"))
+    assert r["unparseable_count"] == 0

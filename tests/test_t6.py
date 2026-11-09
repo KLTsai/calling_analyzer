@@ -12,11 +12,11 @@ _CONFIG = {"models": {"sonnet": {"input": 2.0, "output": 10.0}}}
 
 def rec(**kw):
     base = {
-        "timestamp": _BASE.isoformat(),
+        "ts": _BASE.isoformat(),
         "request_id": "req-001",
         "attempt": 1,
-        "key_name": "key-eng",
-        "key_department": "Engineering",
+        "key_alias": "key-eng",
+        "key_owner_dept": "Engineering",
         "model": "sonnet",
         "status": "success",
         "prompt_tokens": 1000,
@@ -35,56 +35,56 @@ def run(*lines, include_users=False, cfg=None):
 # privacy: default output must not contain employee IDs
 # ---------------------------------------------------------------------------
 
-def test_default_no_user_id_in_report():
-    r = run(rec(user_id="u-secret-99", user_department="Engineering"))
+def test_default_no_end_user_in_report():
+    r = run(rec(end_user="u-secret-99", end_user_dept="Engineering"))
     report_str = json.dumps(r)
     assert "u-secret-99" not in report_str
 
 
 def test_default_user_breakdown_is_none():
-    r = run(rec(user_id="u001", user_department="Engineering"))
+    r = run(rec(end_user="u001", end_user_dept="Engineering"))
     assert r["user_breakdown"] is None
 
 
 def test_include_users_shows_breakdown():
-    r = run(rec(user_id="u001", user_department="Engineering"), include_users=True)
+    r = run(rec(end_user="u001", end_user_dept="Engineering"), include_users=True)
     assert r["user_breakdown"] is not None
-    ids = {u["user_id"] for u in r["user_breakdown"]}
+    ids = {u["end_user"] for u in r["user_breakdown"]}
     assert "u001" in ids
 
 
 def test_include_users_costs_are_correct():
     cost = (1000 * 2.0 + 200 * 10.0) / 1_000_000
-    r = run(rec(user_id="u001", user_department="Engineering"), include_users=True)
-    u_row = next(u for u in r["user_breakdown"] if u["user_id"] == "u001")
+    r = run(rec(end_user="u001", end_user_dept="Engineering"), include_users=True)
+    u_row = next(u for u in r["user_breakdown"] if u["end_user"] == "u001")
     assert abs(u_row["cost"] - cost) < 1e-9
 
 
-def test_no_user_id_no_entry_in_breakdown():
-    # Direct call without user_id — should not appear in breakdown
+def test_no_end_user_no_entry_in_breakdown():
+    # Direct call without end_user — should not appear in breakdown
     r = run(rec(), include_users=True)
     assert r["user_breakdown"] == []
 
 
 def test_multiple_users_in_breakdown():
     r = run(
-        rec(user_id="u001", user_department="Engineering", request_id="r1"),
-        rec(user_id="u002", user_department="Product",     request_id="r2"),
+        rec(end_user="u001", end_user_dept="Engineering", request_id="r1"),
+        rec(end_user="u002", end_user_dept="Product",     request_id="r2"),
         include_users=True,
     )
-    ids = {u["user_id"] for u in r["user_breakdown"]}
+    ids = {u["end_user"] for u in r["user_breakdown"]}
     assert ids == {"u001", "u002"}
 
 
 def test_breakdown_sorted_by_cost_descending():
     r = run(
-        rec(user_id="u-cheap", user_department="Engineering",
+        rec(end_user="u-cheap", end_user_dept="Engineering",
             prompt_tokens=100, completion_tokens=10, request_id="r1"),
-        rec(user_id="u-pricey", user_department="Engineering",
+        rec(end_user="u-pricey", end_user_dept="Engineering",
             prompt_tokens=10000, completion_tokens=1000, request_id="r2"),
         include_users=True,
     )
-    assert r["user_breakdown"][0]["user_id"] == "u-pricey"
+    assert r["user_breakdown"][0]["end_user"] == "u-pricey"
 
 
 # ---------------------------------------------------------------------------

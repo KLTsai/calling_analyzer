@@ -43,24 +43,30 @@ _USERS = [
 ]
 
 
-def _r(ts, rid, attempt, key, dept, uid, udept, model, status, prompt, compl, lat):
-    rec = {
-        "timestamp": ts.isoformat(),
+def _r(ts, rid, attempt, key, dept, uid, udept, model, status, prompt, compl, lat,
+       agent=None):
+    """One log line in the assignment's schema. Empty optional fields are null.
+
+    end_user is only ever set on Agent calls, so a record with a user implies an
+    agent_id; direct calls (chat UI, coding tools) carry neither.
+    """
+    if uid and not agent:
+        agent = f"agent-{key.removeprefix('key-')}"
+    return {
+        "ts": ts.isoformat(),
         "request_id": rid,
         "attempt": attempt,
-        "key_name": key,
-        "key_department": dept,
+        "key_alias": key,
+        "key_owner_dept": dept,
+        "agent_id": agent or None,
+        "end_user": uid or None,
+        "end_user_dept": udept or None,
         "model": model,
-        "status": status,
         "prompt_tokens": prompt,
         "completion_tokens": compl,
+        "status": status,
         "latency_ms": lat,
     }
-    if uid:
-        rec["user_id"] = uid
-    if udept:
-        rec["user_department"] = udept
-    return rec
 
 
 def _base(hour, minute=0, second=0):
@@ -71,7 +77,7 @@ def _deterministic_records():
     """Ten injected symptom patterns. None of these depend on the random seed."""
     recs = []
 
-    # Pattern 2: Attribution defects (user_id present, user_department absent)
+    # Pattern 2: Attribution defects (end_user present, end_user_dept absent)
     for i in range(20):
         ts = _base(10) + timedelta(minutes=i)
         recs.append(_r(ts, f"req-defect-{i:03d}", 1,
@@ -138,7 +144,8 @@ def _deterministic_records():
                        "claude-haiku-5-5", "success", 300, 50, 400))
 
     # Pattern 7: Low-traffic false-positive decoy
-    # key-schedule: 3 calls, 1 error (33.3% rate) — must NOT trigger at min_samples=20
+    # key-schedule: 3 calls, 1 error (33.3% rate). Breaks the literal rule, but with
+    # min_samples=20 it is listed as low-sample, not as an error-rate anomaly.
     for i, status in enumerate(["success", "success", "error"]):
         ts = _base(11) + timedelta(minutes=i)
         recs.append(_r(ts, f"req-sched-{i}", 1,
@@ -151,6 +158,16 @@ def _deterministic_records():
         recs.append(_r(ts, "req-dup-000", a,
                        "key-eng-1", "Engineering", "", "",
                        "claude-sonnet-5-5", "success", 500, 150, 1200))
+
+    # Pattern 2b: Agent call without end_user (a batch job, or an agent that does
+    # not pass the user through). Unattributable, but unlike a direct call it has
+    # an owner who can tell which of the two it is.
+    for i in range(10):
+        ts = _base(18) + timedelta(minutes=i * 5)
+        recs.append(_r(ts, f"req-batch-{i:03d}", 1,
+                       "key-finance-1", "Finance", "", "",
+                       "claude-sonnet-5-5", "success", 6000, 800, 5200,
+                       agent="agent-nightly-report"))
 
     # Pattern 10: unpriced model (always last timestamp for visibility)
     recs.append(_r(_base(23, 0), "req-unpriced-000", 1,
@@ -173,7 +190,7 @@ def generate(n: int, seed: int) -> list[dict]:
     for i in range(n_bg):
         offset = rng.uniform(0, day_s)
         ts = base + timedelta(seconds=offset)
-        key_name, key_dept = rng.choice(_KEYS)
+        key_alias, key_dept = rng.choice(_KEYS)
         model = rng.choices(_MODELS, weights=_MODEL_WEIGHTS, k=1)[0]
 
         if rng.random() < 0.60:
@@ -198,17 +215,17 @@ def generate(n: int, seed: int) -> list[dict]:
             status = "success"
 
         records.append(_r(ts, f"req-{i + 1:06d}", 1,
-                          key_name, key_dept, uid, udept,
+                          key_alias, key_dept, uid, udept,
                           model, status, prompt, compl, lat))
 
-    records.sort(key=lambda r: r["timestamp"])
+    records.sort(key=lambda r: r["ts"])
     return records
 
 
 # Lines the analyzer should report as unparseable (intentional for the demo)
 _BAD_LINES = [
     "# DEMO: 無效 JSON 行（刻意插入，展示工具的錯誤容忍）",
-    '{"timestamp":"2026-11-08T23:59:00+08:00","request_id":"bad-partial"}',
+    '{"ts":"2026-11-08T23:59:00+08:00","request_id":"bad-partial"}',
 ]
 
 

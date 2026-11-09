@@ -1,11 +1,12 @@
 [timezone]
-# Timestamps in reports are shown in this timezone (all internal math uses UTC)
+# Anomaly window times in the report are shown in this timezone.
+# All window arithmetic uses absolute time; this only affects display.
 display = "Asia/Taipei"
 
 [detection]
-# Minimum attempts in a 5-minute window before the error-rate rule can trigger.
-# Default 20 means a healthy key with 3 calls (error rate 33%) never fires.
-# See README for the quantified false-positive math behind this choice.
+# Error-rate windows with fewer attempts than this are still reported, but in a
+# separate "low sample" list, because one error in 3 calls already reads 33%.
+# See README for the false-positive math behind 20.
 min_samples = 20
 
 # Model pricing: USD per 1 million tokens, standard (non-cached, non-batch) tier.
