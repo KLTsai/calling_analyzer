@@ -192,3 +192,50 @@ def test_non_object_json_rejected():
 def test_naive_timestamp_treated_as_utc():
     r = run(rec(ts="2026-11-08T02:00:00"), rec(ts="2026-11-08T10:00:00+08:00", request_id="r2"))
     assert r["unparseable_count"] == 0
+
+
+
+# ---------------------------------------------------------------------------
+# null tokens / latency: keep the line, it may be exactly the error we need
+# ---------------------------------------------------------------------------
+
+def test_error_with_null_tokens_still_counts_for_error_rate():
+    """Gateway 出錯時 token 常是 null：這些錯誤不能被丟掉，否則錯誤率會算低。"""
+    lines = [rec(ts=(_BASE + timedelta(seconds=i)).isoformat(), request_id=f"ok{i}")
+             for i in range(20)]
+    lines += [rec(ts=(_BASE + timedelta(seconds=20 + i)).isoformat(), request_id=f"e{i}",
+                  status="error", completion_tokens=None) for i in range(10)]
+    r = run(*lines, cfg={**_CONFIG, "detection": {"min_samples": 20}})
+    assert r["unparseable_count"] == 0
+    assert r["null_token_attempts"] == 10
+    f = r["error_rate_flags"][0]
+    # peak window with >= 20 samples: last 10 successes + the 10 errors
+    assert (f["errors"], f["sample_count"]) == (10, 20)
+
+
+def test_null_tokens_counted_as_zero_cost():
+    r = run(rec(prompt_tokens=1000, completion_tokens=None))
+    assert abs(r["total_cost"] - 1000 * 2.0 / 1_000_000) < 1e-12
+    r = run(json.dumps({k: v for k, v in json.loads(rec()).items()
+                        if k not in ("prompt_tokens", "completion_tokens")}))
+    assert r["total_cost"] == 0.0
+    assert r["null_token_attempts"] == 1
+
+
+def test_null_tokens_warning_in_text_output():
+    from analyzer import render_text
+    assert "token 是空值" in render_text(run(rec(prompt_tokens=None)))
+
+
+def test_success_without_latency_excluded_from_percentiles():
+    r = run(rec(latency_ms=None), rec(latency_ms=500, request_id="r2"))
+    assert r["latency"]["sonnet"] == {"p50": 500, "p95": 500, "count": 1}
+    assert r["success_without_latency"] == 1
+    from analyzer import render_text
+    assert "沒有 latency_ms" in render_text(r)
+
+
+def test_negative_tokens_rejected():
+    r = run(rec(prompt_tokens=-5000), rec(latency_ms=-1, request_id="r2"), rec(request_id="r3"))
+    assert r["unparseable_reasons"] == {"invalid_value": 2}
+    assert r["total_cost"] > 0

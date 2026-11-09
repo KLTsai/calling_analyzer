@@ -24,8 +24,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _DEFAULT_CONFIG = Path(__file__).parent / "config.toml"
 # Field names exactly as the assignment's Gateway schema defines them.
-REQUIRED = ("ts", "request_id", "attempt", "key_alias", "key_owner_dept", "model",
-            "status", "prompt_tokens", "completion_tokens", "latency_ms")
+# Without these a line cannot be placed in time, grouped, priced or attributed.
+REQUIRED = ("ts", "request_id", "attempt", "key_alias", "key_owner_dept", "model", "status")
+# Gateways often log null tokens / latency on failed calls. Dropping those lines
+# would hide exactly the errors the error-rate rule needs, so they are kept and counted.
+NUMERIC = ("prompt_tokens", "completion_tokens", "latency_ms")
 STATUSES = ("success", "error", "timeout")
 STORM_WINDOW_S, STORM_MIN_ATTEMPTS = 60, 3
 ERROR_WINDOW_S, ERROR_RATE_LIMIT = 300, 0.20
@@ -42,6 +45,16 @@ def _opt(rec: dict, field: str) -> str:
     """Optional field: missing, null and blank all mean empty."""
     v = rec.get(field)
     return "" if v is None else str(v).strip()
+
+
+def _count(rec: dict, field: str) -> int | None:
+    """Non-negative integer, or None when the field is empty."""
+    if _opt(rec, field) == "":
+        return None
+    n = int(float(rec[field]))
+    if n < 0:
+        raise ValueError(f"{field} < 0")
+    return n
 
 
 def _parse(line: str, bad: Counter, missing: Counter) -> dict | None:
@@ -68,7 +81,7 @@ def _parse(line: str, bad: Counter, missing: Counter) -> dict | None:
                                          "status", "agent_id", "end_user", "end_user_dept")},
             "t": (ts - _EPOCH) // _US,  # integer µs: exact window arithmetic
             "attempt": int(rec["attempt"]),
-            **{f: int(float(rec[f])) for f in ("prompt_tokens", "completion_tokens", "latency_ms")},
+            **{f: _count(rec, f) for f in NUMERIC},
         }
     except (ValueError, TypeError, OverflowError):
         bad["invalid_value"] += 1
@@ -100,7 +113,8 @@ def _nearest_rank(sorted_vals: list[int], p: float) -> int:
 
 
 def _empty_waste() -> dict:
-    return {"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "requests": 0}
+    return {"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "requests": 0,
+            "unpriced_attempts": 0}
 
 
 def analyze(records: Iterable[str], config: dict, *, include_users: bool = False) -> dict:
@@ -125,12 +139,16 @@ def analyze(records: Iterable[str], config: dict, *, include_users: bool = False
     user_cost: defaultdict[str, float] = defaultdict(float)
     bad: Counter = Counter()
     missing: Counter = Counter()
+    null_tokens = missing_latency = 0
 
     for raw in records:
         line = raw.strip()
         if not line or not (r := _parse(line, bad, missing)):
             continue
-        p, c, model = r["prompt_tokens"], r["completion_tokens"], r["model"]
+        model = r["model"]
+        if r["prompt_tokens"] is None or r["completion_tokens"] is None:
+            null_tokens += 1
+        p, c = r["prompt_tokens"] or 0, r["completion_tokens"] or 0
         cost = None
         if model in pricing:
             cost = (p * pricing[model]["input"] + c * pricing[model]["output"]) / 1_000_000
@@ -153,7 +171,10 @@ def analyze(records: Iterable[str], config: dict, *, include_users: bool = False
         by_request[r["request_id"]].append((r["t"], r["attempt"], r["status"], cost, p, c))
         by_key[r["key_alias"]].append((r["t"], r["status"] != "success"))
         if r["status"] == "success":
-            latencies[model].append(r["latency_ms"])
+            if r["latency_ms"] is None:
+                missing_latency += 1
+            else:
+                latencies[model].append(r["latency_ms"])
 
     # Waste: per request, only the last successful attempt was useful.
     retry_waste, dead_loss = _empty_waste(), _empty_waste()
@@ -168,6 +189,7 @@ def analyze(records: Iterable[str], config: dict, *, include_users: bool = False
         bucket["requests"] += bool(wasted)
         for *_, cost, p, c in wasted:
             bucket["cost"] += cost or 0.0
+            bucket["unpriced_attempts"] += cost is None
             bucket["prompt_tokens"] += p
             bucket["completion_tokens"] += c
         if len(atts) >= STORM_MIN_ATTEMPTS:
@@ -231,6 +253,8 @@ def analyze(records: Iterable[str], config: dict, *, include_users: bool = False
                     for m, v in ((m, sorted(v)) for m, v in latencies.items())},
         "user_breakdown": [{"end_user": k, "cost": v} for k, v in sorted(
             user_cost.items(), key=lambda x: (-x[1], x[0]))] if include_users else None,
+        "null_token_attempts": null_tokens,
+        "success_without_latency": missing_latency,
         "unparseable_count": sum(bad.values()),
         "unparseable_reasons": dict(bad),
         "missing_fields": dict(missing.most_common()),
@@ -287,6 +311,8 @@ def render_text(report: dict) -> str:
     out += ["",
             "  重試浪費：最終有成功的請求裡，最後一次成功以外的嘗試",
             "  純失敗浪費：從未成功的請求的全部嘗試"]
+    if n := report["retry_waste"]["unpriced_attempts"] + report["dead_loss"]["unpriced_attempts"]:
+        out.append(f"  ⚠  其中 {n} 次嘗試是未定價模型：token 已計入，費用沒有計入")
     if n := report["duplicate_success_count"]:
         out.append(f"  ⚠  {n} 個請求出現多次成功 - Gateway 可能重複送出；"
                    "只保留最後一次，其餘已計入重試浪費")
@@ -332,8 +358,14 @@ def render_text(report: dict) -> str:
                 for u in report["user_breakdown"]] + [""]
 
     unpriced, n_bad = report["unpriced_usage"], report["unparseable_count"]
-    if unpriced or n_bad:
+    n_null, n_lat = report["null_token_attempts"], report["success_without_latency"]
+    has_quality = bool(unpriced or n_bad or n_null or n_lat)
+    if has_quality:
         out += ["── 資料品質 ──", ""]
+    if n_null:
+        out.append(f"  ⚠  {n_null} 次嘗試的 token 是空值，以 0 計（費用與浪費可能偏低）")
+    if n_lat:
+        out.append(f"  ⚠  {n_lat} 次成功嘗試沒有 latency_ms，未納入延遲百分位")
     if unpriced:
         out.append("  ⚠  未定價模型（token 數已統計，費用未計入總額）：")
         out.append(f"       {_l('模型', 24)}{_r('prompt tok', 12)}{_r('compl tok', 11)}"
@@ -350,8 +382,8 @@ def render_text(report: dict) -> str:
             fields = "、".join(f"{k}（{v}）" for k, v in report["missing_fields"].items())
             out.append(f"       缺少必要欄位：{reasons['missing_fields']} 行 - {fields}")
         if reasons.get("invalid_value"):
-            out.append(f"       欄位值不合法（時間、數字或 status）：{reasons['invalid_value']} 行")
-    if unpriced or n_bad:
+            out.append(f"       欄位值不合法（時間、負數或 status）：{reasons['invalid_value']} 行")
+    if has_quality:
         out.append("")
     return "\n".join(out)
 

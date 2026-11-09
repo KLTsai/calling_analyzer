@@ -59,7 +59,7 @@ def test_failed_attempt_before_success_is_retry_waste():
 def test_all_success_no_waste():
     r = run(rec())
     assert r["retry_waste"] == {"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
-                                "requests": 0}
+                                "requests": 0, "unpriced_attempts": 0}
     assert r["dead_loss"]["requests"] == 0
 
 
@@ -182,3 +182,13 @@ def test_unpriced_model_waste_counts_tokens_not_cost():
     )
     assert r["retry_waste"]["cost"] == 0.0
     assert r["retry_waste"]["prompt_tokens"] == 400
+    assert r["retry_waste"]["unpriced_attempts"] == 1
+    assert "1 次嘗試是未定價模型" in render_text(r)
+
+
+def test_priced_waste_has_no_unpriced_note():
+    r = run(
+        rec(ts=ts(0),  request_id="req-p", attempt=1, status="error"),
+        rec(ts=ts(10), request_id="req-p", attempt=2, status="success"),
+    )
+    assert "未定價模型" not in render_text(r)
